@@ -64,4 +64,69 @@ def build_embed(server_dt, items):
 
 # ---------- discord helpers ----------
 async def get_pins(session):
-    # Some ser
+    # Some servers return 404 for pins; treat that as "no pins" and fallback.
+    async with session.get(f"{API}/channels/{CHANNEL_ID}/pins", headers=HDRS) as r:
+        if r.status == 404:
+            return []  # fallback to recent messages
+        r.raise_for_status()
+        return await r.json()
+
+async def list_recent_messages(session, limit=50):
+    async with session.get(f"{API}/channels/{CHANNEL_ID}/messages?limit={limit}", headers=HDRS) as r:
+        r.raise_for_status()
+        return await r.json()
+
+async def create_message(session, embed, pin_try=True):
+    payload = {"content":"", "embeds":[embed]}
+    async with session.post(f"{API}/channels/{CHANNEL_ID}/messages", headers=HDRS, json=payload) as r:
+        txt = await r.text()
+        if r.status >= 400: raise RuntimeError(txt)
+        msg = await r.json()
+    if pin_try:
+        await session.put(f"{API}/channels/{CHANNEL_ID}/pins/{msg['id']}", headers=HDRS)
+    return msg["id"]
+
+async def edit_message(session, mid, embed):
+    payload = {"content":"", "embeds":[embed]}
+    async with session.patch(f"{API}/channels/{CHANNEL_ID}/messages/{mid}", headers=HDRS, json=payload) as r:
+        txt = await r.text()
+        if r.status >= 400: raise RuntimeError(txt)
+
+async def find_existing_message_id(session):
+    # 1) Try pins first
+    try:
+        pins = await get_pins(session)
+        for m in pins or []:
+            if m.get("author",{}).get("bot") and any(e.get("title")==TITLE for e in m.get("embeds",[])):
+                return m["id"]
+    except Exception:
+        pass
+    # 2) Fallback: scan recent messages
+    try:
+        msgs = await list_recent_messages(session, limit=50)
+        for m in msgs:
+            if m.get("author",{}).get("bot") and any(e.get("title")==TITLE for e in m.get("embeds",[])):
+                return m["id"]
+    except Exception:
+        pass
+    return None
+
+# ---------- main ----------
+async def main():
+    async with aiohttp.ClientSession() as session:
+        html = await fetch(session, EVENT_URL)
+        server_dt, items = parse_server_time_and_upcoming(html)
+        embed = build_embed(server_dt, items)
+
+        mid = await find_existing_message_id(session)
+        if mid:
+            await edit_message(session, mid, embed)
+        else:
+            try:
+                await create_message(session, embed, pin_try=True)
+            except Exception:
+                # If pin fails (permissions), still create the message without pinning
+                await create_message(session, embed, pin_try=False)
+
+if __name__ == "__main__":
+    asyncio.run(main())
