@@ -1,4 +1,4 @@
-import os, re, json, time, math, asyncio
+import os, re, json, asyncio
 from datetime import datetime, timedelta
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError
@@ -9,8 +9,8 @@ EVENT_URL   = os.environ.get("EVENT_URL", "https://ko4fun.net/Features/EventSche
 
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122 Safari/537.36"
 
-TITLE_PREFIX = "KO4Fun — Event Reminder"
-COLOR = 0xC81E1E
+TITLE = "KO4Fun — Upcoming Events"
+COLOR = 0x5865F2  # Discord blurple
 
 # ---------- Render page ----------
 async def get_rendered_text(url: str) -> str:
@@ -28,20 +28,22 @@ async def get_rendered_text(url: str) -> str:
 
 # ---------- Parse helpers ----------
 def parse_server_time(page_text: str) -> datetime:
+    # The site shows “Server Time: HH:MM:SS” and a date like “November 04, 2025”
     m_time = re.search(r'(\d{2}:\d{2}:\d{2})', page_text)
     hhmmss = m_time.group(1) if m_time else "00:00:00"
     m_date = re.search(r'(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},\s+\d{4}', page_text)
-    d = datetime.strptime(m_date.group(0), "%B %d, %Y").date() if m_date else datetime.utcnow().date()
+    date_obj = datetime.strptime(m_date.group(0), "%B %d, %Y").date() if m_date else datetime.utcnow().date()
     h, m, s = map(int, hhmmss.split(":"))
-    return datetime(d.year, d.month, d.day, h, m, s)
+    return datetime(date_obj.year, date_obj.month, date_obj.day, h, m, s)
 
 def parse_upcoming_items(page_text: str):
-    # Prefer the "Upcoming Events" section if present
+    # Prefer the “Upcoming Events” section
     scope = page_text
     sec = re.search(r'Upcoming\s+Events(.+)', page_text, re.I | re.S)
     if sec: scope = sec.group(0)
 
-    pat = re.compile(r'([A-Za-z0-9\.\&\-\/\s]+?)\s*(?:\u00A0|\s)*\(\s*(\d{1,2}:\d{2})\s*\)')  # "Name (HH:MM)"
+    # Matches “Santa Event (22:55)”
+    pat = re.compile(r'([A-Za-z0-9\.\&\-\/\s]+?)\s*(?:\u00A0|\s)*\(\s*(\d{1,2}:\d{2})\s*\)')
     items = []
     for m in pat.finditer(scope):
         name = " ".join(m.group(1).split())
@@ -50,7 +52,7 @@ def parse_upcoming_items(page_text: str):
         if any(bad in name for bad in ("Server Time","Upcoming Events","See all pinned")): continue
         items.append((name, hhmm))
 
-    # Fallback search if section parse failed
+    # Fallback: scan whole page if section not found
     if not items:
         for m in pat.finditer(page_text):
             name = " ".join(m.group(1).split()); hhmm = m.group(2)
@@ -58,28 +60,24 @@ def parse_upcoming_items(page_text: str):
             if "Server Time" in name or "Upcoming Events" in name: continue
             items.append((name, hhmm))
 
-    # Dedup, keep order
-    seen = set(); out = []
+    # De-dup while preserving order
+    seen, out = set(), []
     for t in items:
         if t not in seen:
             seen.add(t); out.append(t)
     return out
 
-def event_epoch_from_hhmm(server_dt: datetime, hhmm: str) -> int:
-    eh, em = map(int, hhmm.split(":"))
-    ev = server_dt.replace(hour=eh, minute=em, second=0, microsecond=0)
-    if ev < server_dt:
-        ev += timedelta(days=1)
-    return int(ev.timestamp())
+def to_epoch(server_dt, hhmm):
+    hh, mm = map(int, hhmm.split(":"))
+    t = server_dt.replace(hour=hh, minute=mm, second=0, microsecond=0)
+    if t < server_dt:
+        t += timedelta(days=1)
+    return int(t.timestamp())
 
 # ---------- Webhook ----------
 def send_embed(title: str, description: str):
     url = WEBHOOK_URL + ("&" if "?" in WEBHOOK_URL else "?") + "wait=true"
-    headers = {
-        "User-Agent": UA,
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-    }
+    headers = {"User-Agent": UA, "Content-Type": "application/json", "Accept": "application/json"}
     payload = {
         "embeds": [{
             "title": title,
@@ -92,54 +90,26 @@ def send_embed(title: str, description: str):
     with urlopen(req) as r:
         print("Webhook POST:", r.status); r.read()
 
-# ---------- Main logic ----------
-THRESHOLDS = [30, 10]   # minutes before
-WINDOW = 2              # ± minutes tolerance to catch with 5-min cron
-
-def within_window(mins_left: float, target: int, window: int = WINDOW) -> bool:
-    return abs(mins_left - target) <= window
-
+# ---------- Main ----------
 async def main():
     text = await get_rendered_text(EVENT_URL)
     server_dt = parse_server_time(text)
     items = parse_upcoming_items(text)
 
     if not items:
-        print("[INFO] No upcoming items parsed; exiting quietly.")
-        return
+        print("[INFO] No upcoming events parsed."); return
 
-    # Pick the next event (soonest event time >= now)
-    candidates = []
-    for name, hhmm in items:
-        t_epoch = event_epoch_from_hhmm(server_dt, hhmm)
-        delta_min = (t_epoch - int(server_dt.timestamp())) / 60.0
-        if delta_min >= 0:
-            candidates.append((t_epoch, name, hhmm, delta_min))
-    if not candidates:
-        print("[INFO] No future events in parsed list; exiting.")
-        return
+    # Build a simple snapshot of the next few events (keep first 3–4)
+    now_epoch = int(server_dt.timestamp())
+    rows = []
+    for name, hhmm in items[:4]:
+        t_epoch = to_epoch(server_dt, hhmm)
+        # Discord time tags: <t:EPOCH:t> = locale time, <t:EPOCH:R> = relative
+        rows.append(f"• **{name}** — <t:{t_epoch}:t> • <t:{t_epoch}:R>")
 
-    t_epoch, name, hhmm, mins_left = sorted(candidates, key=lambda x: x[0])[0]
-    print(f"[INFO] Next event: {name} at {hhmm} (in {mins_left:.1f} min)")
-
-    # Fire only at ~30m or ~10m before
-    label = None
-    for thr in THRESHOLDS:
-        if within_window(mins_left, thr):
-            label = f"{thr} minutes"
-            break
-
-    if not label:
-        print("[INFO] Not within 30m/10m window; no post.")
-        return
-
-    description = (
-        f"**{name}** — <t:{t_epoch}:t> • <t:{t_epoch}:R>\n"
-        f"Reminder: starts in **{label}**."
-    )
-    title = f"{TITLE_PREFIX} ({label})"
+    description = "\n".join(rows)
     try:
-        send_embed(title, description)
+        send_embed(TITLE, description)
     except HTTPError as e:
         try:
             print("Webhook HTTPError:", e.code, e.read().decode())
