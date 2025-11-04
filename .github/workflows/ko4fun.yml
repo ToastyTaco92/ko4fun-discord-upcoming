@@ -5,6 +5,9 @@ on:
     - cron: "*/5 * * * *"   # every 5 minutes
   workflow_dispatch:
 
+permissions:
+  contents: write   # allow the job to update .ko4fun_state.json
+
 jobs:
   run:
     runs-on: ubuntu-latest
@@ -15,7 +18,7 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install deps (Playwright + browser)
+      - name: Install deps (Playwright + Chromium)
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
@@ -26,4 +29,6 @@ jobs:
           DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
           DISCORD_CHANNEL_ID: ${{ secrets.DISCORD_CHANNEL_ID }}
           EVENT_URL: https://ko4fun.net/Features/EventSchedule
+          GITHUB_TOKEN: ${{ github.token }}            # used to save state file
+          GITHUB_REPOSITORY: ${{ github.repository }}  # owner/repo
         run: python -u ko_events.py
