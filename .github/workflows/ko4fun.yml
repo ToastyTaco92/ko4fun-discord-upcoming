@@ -2,12 +2,15 @@ name: KO4Fun - Discord Upcoming (Webhook)
 
 on:
   schedule:
-    - cron: "0 * * * *"   # every hour at minute 0 (UTC)
+    - cron: "*/5 * * * *"   # run every 5 minutes (UTC)
   workflow_dispatch:
 
 jobs:
   run:
     runs-on: ubuntu-latest
+    concurrency:
+      group: ko4fun-upcoming
+      cancel-in-progress: true
     steps:
       - uses: actions/checkout@v4
 
@@ -21,47 +24,7 @@ jobs:
           pip install -r requirements.txt
           python -m playwright install --with-deps chromium
 
-      - name: Webhook preflight (GET + plain POST)
-        env:
-          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-        run: |
-          python - <<'PY'
-          import os, json, urllib.request, urllib.error, sys
-          url = os.environ["DISCORD_WEBHOOK_URL"].strip()
-          UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122 Safari/537.36"
-
-          def show_err(e):
-              try:
-                  print(e.read().decode())
-              except Exception:
-                  print("<no error body>")
-
-          # GET metadata
-          try:
-              req = urllib.request.Request(url, method="GET", headers={"User-Agent": UA, "Accept":"application/json"})
-              with urllib.request.urlopen(req) as r:
-                  meta = json.loads(r.read().decode())
-                  print("GET:", r.status, "| channel_id:", meta.get("channel_id"), "| guild_id:", meta.get("guild_id"))
-          except urllib.error.HTTPError as e:
-              print("GET failed:", e.code); show_err(e); sys.exit(1)
-
-          # POST simple content
-          post_url = url + ("&" if "?" in url else "?") + "wait=true"
-          payload = {"content": "(preflight) webhook content test ✅"}
-          try:
-              req = urllib.request.Request(
-                  post_url,
-                  data=json.dumps(payload).encode(),
-                  headers={"User-Agent": UA, "Content-Type":"application/json","Accept":"application/json"},
-                  method="POST",
-              )
-              with urllib.request.urlopen(req) as r:
-                  print("POST:", r.status, "OK")
-          except urllib.error.HTTPError as e:
-              print("POST failed:", e.code); show_err(e); sys.exit(1)
-          PY
-
-      - name: Post Upcoming Events via Webhook
+      - name: Post upcoming reminder (30m / 10m)
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           EVENT_URL: https://ko4fun.net/Features/EventSchedule
