@@ -1,8 +1,8 @@
-name: KO4Fun → Discord Upcoming (Webhook)
+name: KO4Fun - Discord Upcoming (Webhook)
 
 on:
   schedule:
-    - cron: "*/5 * * * *"   # every 5 minutes
+    - cron: "*/5 * * * *"
   workflow_dispatch:
 
 jobs:
@@ -21,8 +21,7 @@ jobs:
           pip install -r requirements.txt
           python -m playwright install --with-deps chromium
 
-      # ---- Preflight proves the webhook URL is valid and can post plain text.
-      - name: Webhook preflight (GET + plain POST with error body)
+      - name: Webhook preflight (GET + plain POST)
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: |
@@ -36,20 +35,20 @@ def show_err(e):
     except Exception:
         print("<no error body>")
 
-# 1) GET metadata (should be 200)
+# GET webhook metadata
 try:
-    with urllib.request.urlopen(urllib.request.Request(url, method="GET")) as r:
+    req = urllib.request.Request(url, method="GET")
+    with urllib.request.urlopen(req) as r:
         meta = json.loads(r.read().decode())
-        print("GET:", r.status, "| channel_id:", meta.get("channel_id"), "| guild_id:", meta.get("guild_id"), "| type:", meta.get("type"))
+        print("GET:", r.status, "| channel_id:", meta.get("channel_id"), "| guild_id:", meta.get("guild_id"))
 except urllib.error.HTTPError as e:
     print("GET failed:", e.code); show_err(e); sys.exit(1)
 
-# 2) Simple POST (content only)
-test_url = url + ("&" if "?" in url else "?") + "wait=true"
-payload = {"content":"(preflight) webhook content test ✅"}
-req = urllib.request.Request(test_url, data=json.dumps(payload).encode(),
-                             headers={"Content-Type":"application/json"}, method="POST")
+# POST a minimal content message
+post_url = url + ("&" if "?" in url else "?") + "wait=true"
+payload = {"content": "(preflight) webhook content test ✅"}
 try:
+    req = urllib.request.Request(post_url, data=json.dumps(payload).encode(), headers={"Content-Type":"application/json"}, method="POST")
     with urllib.request.urlopen(req) as r:
         print("POST:", r.status, "OK")
 except urllib.error.HTTPError as e:
