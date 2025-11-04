@@ -2,7 +2,7 @@ name: KO4Fun - Discord Upcoming (Webhook)
 
 on:
   schedule:
-    - cron: "*/5 * * * *"   # run every 5 minutes (UTC)
+    - cron: "0,30 * * * *"   # run at mm=00 and mm=30 (UTC)
   workflow_dispatch:
 
 jobs:
@@ -24,7 +24,7 @@ jobs:
           pip install -r requirements.txt
           python -m playwright install --with-deps chromium
 
-      - name: Post upcoming reminder (30m / 10m)
+      - name: Post upcoming snapshot (every :00 / :30)
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           EVENT_URL: https://ko4fun.net/Features/EventSchedule
