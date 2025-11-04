@@ -8,12 +8,15 @@ WEBHOOK_URL = os.environ["DISCORD_WEBHOOK_URL"].strip()
 EVENT_URL   = os.environ.get("EVENT_URL", "https://ko4fun.net/Features/EventSchedule")
 TITLE       = "KO4Fun — Upcoming Events"
 
+UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122 Safari/537.36"
+
 # ----------- Render page (JS content) -----------
 async def get_rendered_text(url: str) -> str:
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=True)
         context = await browser.new_context()
         page = await context.new_page()
+        await page.set_extra_http_headers({"User-Agent": UA, "Accept": "text/html"})
         await page.goto(url, wait_until="networkidle", timeout=45000)
         await page.wait_for_timeout(2500)
         text = await page.evaluate("document.body.innerText")
@@ -76,21 +79,23 @@ def build_embed(server_dt: datetime, items):
         "footer": {"text": "Source: ko4fun.net • auto-updated by GitHub Actions"}
     }
 
-# ----------- Webhook sender (text then embed) -----------
+# ----------- Webhook sender (with headers, text then embed) -----------
 def webhook_post(content: str = "", embed: dict | None = None):
     url = WEBHOOK_URL + ("&" if "?" in WEBHOOK_URL else "?") + "wait=true"
+    headers = {
+        "User-Agent": UA,
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
     if not content and embed is None:
         content = " "
 
     def send(payload: dict):
-        req = Request(url, data=json.dumps(payload).encode(),
-                      headers={"Content-Type":"application/json"}, method="POST")
+        req = Request(url, data=json.dumps(payload).encode(), headers=headers, method="POST")
         with urlopen(req) as r:
             print("Webhook POST:", r.status); r.read()
 
-    # 1) Always post a minimal text message
     send({"content": content or " "})
-    # 2) Then (optionally) post the embed
     if embed is not None:
         send({"embeds": [embed]})
 
