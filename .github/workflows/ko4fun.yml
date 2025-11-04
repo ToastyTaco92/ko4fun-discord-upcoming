@@ -1,8 +1,8 @@
-name: KO4Fun – Discord Upcoming (Webhook)
+name: KO4Fun → Discord Upcoming (Webhook)
 
 on:
   schedule:
-    - cron: "0,30 * * * *"   # every :00 and :30
+    - cron: "0,30 * * * *"   # top of the hour and half past (UTC)
   workflow_dispatch:
 
 jobs:
