@@ -3,132 +3,125 @@ import os, re, json, asyncio
 from urllib.request import Request, urlopen
 from playwright.async_api import async_playwright
 
+# ---- Config via secrets / env
 WEBHOOK_URL = os.environ["DISCORD_WEBHOOK_URL"].strip()
 EVENT_URL   = os.environ.get("EVENT_URL", "https://ko4fun.net/Features/EventSchedule")
-UA          = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36"
 
-TITLE = "KO4Fun — Upcoming Events"
-COLOR = 0x5865F2
+UA     = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36"
+TITLE  = "KO4Fun — Upcoming Events"
+COLOR  = 0x5865F2
 
-COUNTDOWN_RE = re.compile(r"\b(\d{1,2}):(\d{2}):(\d{2})\b")
+# patterns we need
+RE_COUNTDOWN = re.compile(r"\b(\d{1,2}):(\d{2}):(\d{2})\b")
+# Titles on KO4Fun typically look like: "Santa Event (22:55)" with countdown on the next line
+RE_EVENT_ROW = re.compile(r"(?P<title>[A-Za-z0-9'().\- ]+?)\s*\(\d{1,2}:\d{2}\)\s*\n\s*(?P<cd>\d{1,2}:\d{2}:\d{2})")
 
-def to_minutes(hhmmss: str):
-    m = COUNTDOWN_RE.search(hhmmss or "")
-    if not m: return None
+def hhmmss_to_minutes(hhmmss: str) -> int | None:
+    m = RE_COUNTDOWN.search(hhmmss or "")
+    if not m:
+        return None
     h, m_, s = map(int, m.groups())
-    return (h*3600 + m_*60 + s) // 60
+    return (h * 3600 + m_ * 60 + s) // 60
 
-def post_webhook(description: str):
-    url = WEBHOOK_URL + ("&" if "?" in WEBHOOK_URL else "?") + "wait=true"
+def post_webhook(lines: list[str]) -> None:
+    # One embed, each event on its own bullet line
+    desc = "\n".join(lines) if lines else "_No upcoming events found._"
+    url  = WEBHOOK_URL + ("&" if "?" in WEBHOOK_URL else "?") + "wait=true"
     payload = {
         "embeds": [{
             "title": TITLE,
-            "description": description,
+            "description": desc,
             "color": COLOR,
             "footer": {"text": "Source: ko4fun.net • auto-updated by GitHub Actions"},
         }]
     }
     req = Request(url, data=json.dumps(payload).encode(),
-                  headers={"User-Agent": UA, "Content-Type":"application/json"}, method="POST")
+                  headers={"User-Agent": UA, "Content-Type": "application/json"},
+                  method="POST")
     with urlopen(req) as r:
         r.read()
         print("Webhook POST:", r.status)
 
-async def scrape():
+async def scrape_upcoming_text() -> str:
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=True)
         ctx     = await browser.new_context()
         page    = await ctx.new_page()
         await page.set_extra_http_headers({"User-Agent": UA})
-        await page.goto(EVENT_URL, wait_until="networkidle", timeout=45000)
-        await page.wait_for_timeout(1200)
+        await page.goto(EVENT_URL, wait_until="domcontentloaded", timeout=60000)
 
-        items = await page.evaluate("""
-(() => {
-  const norm = t => (t||"").replace(/\\s+/g,' ').trim();
+        # We’ll wait a touch so the right panel populates
+        await page.wait_for_timeout(1500)
 
-  // 1) Find the *exact* "UPCOMING EVENTS" header
-  const heading = Array.from(document.querySelectorAll('*, *:before, *:after'))
-    .map(el => el instanceof Element ? el : null)
-    .filter(Boolean)
-    .find(el => /^UPCOMING\\s+EVENTS$/i.test(norm(el.textContent)));
-
-  if (!heading) return [];
-
-  // 2) Find a sensible container for the cards (walk up until it has many descendants)
-  let column = heading;
-  while (column && column.querySelectorAll('*').length < 15) column = column.parentElement;
-  if (!column) column = heading.parentElement || heading;
-
-  // 3) Within this column, grab blocks that look like those event cards:
-  //    - First line: event name (no colon)
-  //    - Second line: either "NOW ACTIVE" or HH:MM:SS
-  const cards = [];
-  for (const el of column.querySelectorAll('div')) {
-    const lines = (el.innerText || '')
-      .split('\\n').map(s => s.trim()).filter(Boolean);
-
-    if (lines.length < 2 || lines.length > 8) continue;
-
-    const first = lines[0];
-    const second = lines[1];
-
-    // Exclude headers like "SERVER TIME : ..." etc.
-    if (/\\:/.test(first)) continue;
-
-    const isNow = /\\bNOW\\s+ACTIVE\\b/i.test(second);
-    const hasClock = /\\b\\d{1,2}:\\d{2}:\\d{2}\\b/.test(second);
-    if (!isNow && !hasClock) continue;
-
-    // Clean title (strip "(HH:MM)" if present)
-    const name = first.replace(/\\(\\d{1,2}:\\d{2}\\)\\s*$/,'').trim();
-
-    // Second line to return as-is
-    cards.push({ name, status: isNow ? "NOW ACTIVE" : second });
-  }
-
-  // Deduplicate while preserving order
-  const out = [];
-  const seen = new Set();
-  for (const c of cards) {
-    const key = c.name + "|" + c.status;
-    if (!c.name || seen.has(key)) continue;
-    seen.add(key);
-    out.push(c);
-  }
-
-  // The panel shows up to 4 lines; keep first 4
-  return out.slice(0, 4);
-})()
-        """)
-
-        await ctx.close()
+        # Grab the whole page text, then slice to the "UPCOMING EVENTS" section
+        body_text = await page.inner_text("body")
         await browser.close()
-        return items or []
+
+    # Normalize whitespace to make matching stable
+    text = re.sub(r"[ \t]+", " ", body_text)
+    text = re.sub(r"\r", "", text)
+
+    # Keep only the segment after the "UPCOMING EVENTS" header.
+    # (This header is exactly what’s rendered above the right-hand panel.)
+    if "UPCOMING EVENTS" not in text:
+        return ""
+
+    segment = text.split("UPCOMING EVENTS", 1)[1]
+    # Stop at a strong delimiter if present (not strictly required, but keeps noise down)
+    # Common anchors on the page include "CALENDAR", "EVENT SCHEDULE", etc.
+    for stopper in ["CALENDAR", "EVENT SCHEDULE", "©", "KOFUN.NET", "SERVER TIME"]:
+        if stopper in segment:
+            segment = segment.split(stopper, 1)[0]
+
+    return segment.strip()
+
+def build_event_lines(panel_text: str) -> list[str]:
+    """
+    The right panel consists of:
+      - Top card: 'Raffle Event' + 'NOW ACTIVE' line when active.
+      - Following cards like 'Santa Event (22:55)' with a countdown '00:27:59' on the next line.
+    We will:
+      1) If we see 'Raffle Event' AND 'NOW ACTIVE' in the same panel, add 'Raffle Event : NOW ACTIVE'.
+      2) For every 'Title (HH:MM)' followed by a 'HH:MM:SS' countdown, add 'Title : X minutes'.
+    """
+    lines: list[str] = []
+
+    # 1) When the raffle card is live it shows a dedicated "NOW ACTIVE" line within the panel.
+    if "Raffle Event" in panel_text and "NOW ACTIVE" in panel_text:
+        # Make sure we only tag the raffle if "NOW ACTIVE" is actually nearby.
+        # This keeps us from incorrectly labeling other cards.
+        raffle_chunk = panel_text.split("Raffle Event", 1)[1][:120]  # look right after the title
+        if "NOW ACTIVE" in raffle_chunk:
+            lines.append("• Raffle Event : NOW ACTIVE")
+
+    # 2) Parse every “Title (HH:MM)” + next-line “HH:MM:SS” countdown pair
+    for m in RE_EVENT_ROW.finditer(panel_text):
+        title = m.group("title").strip()
+        # Avoid duplicating the Raffle “active” row if it accidentally has a time format nearby
+        if title.lower().startswith("raffle event"):
+            continue
+        cd = m.group("cd").strip()
+        mins = hhmmss_to_minutes(cd)
+        if mins is None:
+            continue
+        if mins >= 60:
+            hours = mins // 60
+            rem   = mins % 60
+            if rem == 0:
+                nice = f"{hours} hour{'s' if hours != 1 else ''}"
+            else:
+                nice = f"{hours}h {rem}m"
+        else:
+            nice = f"{mins} minute{'s' if mins != 1 else ''}"
+
+        lines.append(f"• {title} : {nice}")
+
+    return lines
 
 async def main():
-    items = await scrape()
-    if not items:
-        post_webhook("_No upcoming events found._")
-        return
-
-    lines = []
-    for it in items:
-        name   = it.get("name","").strip()
-        status = it.get("status","").strip()
-        if not name or not status: continue
-
-        if status.upper() == "NOW ACTIVE":
-            lines.append(f"{name} : NOW ACTIVE")
-        else:
-            mins = to_minutes(status)
-            if mins is None:
-                lines.append(f"{name} : {status}")
-            else:
-                unit = "minute" if mins == 1 else "minutes"
-                lines.append(f"{name} : {mins} {unit}")
-
-    post_webhook("\\n".join(lines) if lines else "_No upcoming events found._")
+    panel = await scrape_upcoming_text()
+    lines = build_event_lines(panel)
+    post_webhook(lines)
 
 if __name__ == "__main__":
     asyncio.run(main())
