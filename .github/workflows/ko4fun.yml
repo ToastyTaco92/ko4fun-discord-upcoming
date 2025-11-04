@@ -1,16 +1,13 @@
-name: KO4Fun - Discord Upcoming (Webhook)
+name: KO4Fun – Discord Upcoming (Webhook)
 
 on:
   schedule:
-    - cron: "0,30 * * * *"   # run at mm=00 and mm=30 (UTC)
+    - cron: "0,30 * * * *"   # every :00 and :30
   workflow_dispatch:
 
 jobs:
   run:
     runs-on: ubuntu-latest
-    concurrency:
-      group: ko4fun-upcoming
-      cancel-in-progress: true
     steps:
       - uses: actions/checkout@v4
 
@@ -24,9 +21,8 @@ jobs:
           pip install -r requirements.txt
           python -m playwright install --with-deps chromium
 
-      - name: Post upcoming snapshot (every :00 / :30)
+      - name: Post Upcoming Events via Webhook
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           EVENT_URL: https://ko4fun.net/Features/EventSchedule
-        run: |
-          python -u ko_events.py
+        run: python -u ko_events.py
