@@ -27,7 +27,6 @@ jobs:
         run: |
           python - <<'PY'
           import os, json, urllib.request, urllib.error, sys
-
           url = os.environ["DISCORD_WEBHOOK_URL"].strip()
 
           def show_err(e):
