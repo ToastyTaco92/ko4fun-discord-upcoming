@@ -79,25 +79,29 @@ def build_embed(server_dt: datetime, items):
         "footer": {"text": "Source: ko4fun.net • auto-updated by GitHub Actions"}
     }
 
-# ----------- Webhook sender (with headers, text then embed) -----------
-def webhook_post(content: str = "", embed: dict | None = None):
+# ----------- Webhook sender (embed-only or text-only) -----------
+def webhook_post(content: str | None = None, embed: dict | None = None):
+    """
+    If embed is provided -> send embed only (no content key).
+    Else require non-empty text content.
+    """
     url = WEBHOOK_URL + ("&" if "?" in WEBHOOK_URL else "?") + "wait=true"
     headers = {
         "User-Agent": UA,
         "Content-Type": "application/json",
         "Accept": "application/json",
     }
-    if not content and embed is None:
-        content = " "
 
-    def send(payload: dict):
-        req = Request(url, data=json.dumps(payload).encode(), headers=headers, method="POST")
-        with urlopen(req) as r:
-            print("Webhook POST:", r.status); r.read()
-
-    send({"content": content or " "})
     if embed is not None:
-        send({"embeds": [embed]})
+        payload = {"embeds": [embed]}
+    else:
+        if not content or not content.strip():
+            raise ValueError("Cannot send an empty Discord message (no content and no embed).")
+        payload = {"content": content}
+
+    req = Request(url, data=json.dumps(payload).encode(), headers=headers, method="POST")
+    with urlopen(req) as r:
+        print("Webhook POST:", r.status); r.read()
 
 # ----------- Main -----------
 async def main():
@@ -108,7 +112,7 @@ async def main():
     print(f"[INFO] Parsed items: {len(items)}")
     embed = build_embed(server_dt, items)
     try:
-        webhook_post("", embed)
+        webhook_post(embed=embed)
     except HTTPError as e:
         try:
             print("Webhook HTTPError:", e.code, e.read().decode())
