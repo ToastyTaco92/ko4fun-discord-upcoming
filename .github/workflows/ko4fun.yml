@@ -1,4 +1,4 @@
-name: KO4Fun → Discord Upcoming
+name: KO4Fun → Discord Upcoming (Webhook)
 
 on:
   schedule:
@@ -10,7 +10,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -21,9 +20,8 @@ jobs:
           pip install -r requirements.txt
           python -m playwright install --with-deps chromium
 
-      - name: Post Upcoming Events to Discord
+      - name: Post Upcoming Events via Webhook
         env:
-          DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
-          DISCORD_CHANNEL_ID: ${{ secrets.DISCORD_CHANNEL_ID }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           EVENT_URL: https://ko4fun.net/Features/EventSchedule
         run: python -u ko_events.py
