@@ -10,6 +10,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -19,6 +20,41 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           python -m playwright install --with-deps chromium
+
+      # ---- Preflight proves the webhook URL is valid and can post plain text.
+      - name: Webhook preflight (GET + plain POST with error body)
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          python - <<'PY'
+import os, json, urllib.request, urllib.error, sys
+url = os.environ["DISCORD_WEBHOOK_URL"].strip()
+
+def show_err(e):
+    try:
+        print(e.read().decode())
+    except Exception:
+        print("<no error body>")
+
+# 1) GET metadata (should be 200)
+try:
+    with urllib.request.urlopen(urllib.request.Request(url, method="GET")) as r:
+        meta = json.loads(r.read().decode())
+        print("GET:", r.status, "| channel_id:", meta.get("channel_id"), "| guild_id:", meta.get("guild_id"), "| type:", meta.get("type"))
+except urllib.error.HTTPError as e:
+    print("GET failed:", e.code); show_err(e); sys.exit(1)
+
+# 2) Simple POST (content only)
+test_url = url + ("&" if "?" in url else "?") + "wait=true"
+payload = {"content":"(preflight) webhook content test ✅"}
+req = urllib.request.Request(test_url, data=json.dumps(payload).encode(),
+                             headers={"Content-Type":"application/json"}, method="POST")
+try:
+    with urllib.request.urlopen(req) as r:
+        print("POST:", r.status, "OK")
+except urllib.error.HTTPError as e:
+    print("POST failed:", e.code); show_err(e); sys.exit(1)
+PY
 
       - name: Post Upcoming Events via Webhook
         env:
