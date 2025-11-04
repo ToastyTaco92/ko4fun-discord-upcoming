@@ -1,91 +1,79 @@
-# ko_events.py — scrape KO4Fun Upcoming Events and post to Discord via webhook
-import os, re, math, asyncio, json
+# ko_events.py
+import os, re, json, math, asyncio
 from urllib.request import Request, urlopen
-from urllib.error import HTTPError, URLError
-
+from urllib.error import HTTPError
 from playwright.async_api import async_playwright
 
 WEBHOOK_URL = os.environ["DISCORD_WEBHOOK_URL"].strip()
 EVENT_URL   = os.environ.get("EVENT_URL", "https://ko4fun.net/Features/EventSchedule").strip()
+TITLE       = "KO4Fun — Upcoming Events"
 
-TITLE = "KO4Fun — Upcoming Events"
+COUNTDOWN_RE = re.compile(r"^\d{2}:\d{2}:\d{2}$")
 
-def _plural(v, s):
-    return f"{v} {s}{'' if v==1 else 's'}"
+def hhmmss_to_minutes(hhmmss: str) -> int:
+    h, m, s = map(int, hhmmss.split(":"))
+    return max(0, math.ceil((h*3600 + m*60 + s) / 60))
 
-def hhmmss_to_minutes(s: str) -> int:
-    # Accept 00:27:35 or 27:35 (just in case)
-    m = re.search(r"\b(?:(\d{1,2}):)?(\d{1,2}):(\d{2})\b", s)
-    if not m:
-        return None
-    h = int(m.group(1) or 0)
-    mins = int(m.group(2))
-    secs = int(m.group(3))
-    total = h*3600 + mins*60 + secs
-    return max(1, math.ceil(total/60.0))
+async def get_panel_text(page):
+    # Find the "UPCOMING EVENTS" header, then take its nearest ancestor container.
+    header = page.get_by_text("UPCOMING EVENTS", exact=True).first
+    container = header.locator("xpath=ancestor::*[self::div or self::section][1]")
+    # Grab raw inner text and normalize
+    raw = await container.inner_text()
+    # Some themes put the header text inside the same container, strip it out if present
+    raw = raw.replace("UPCOMING EVENTS", "")
+    lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
+    return lines
 
-def pick_title(raw: str) -> str:
-    # Clean noisy suffixes like "(22:55)"
-    t = re.sub(r"\s*\(\d{1,2}:\d{2}\)\s*$", "", raw).strip()
-    return t
-
-async def fetch_upcoming() -> list[tuple[str, str]]:
+def extract_events(lines):
     """
-    Returns a list of (name, status) where status is either 'NOW ACTIVE' or 'X minutes'
-    pulled strictly from the UPCOMING EVENTS panel.
+    The panel appears as pairs of lines:
+      <Event Name (maybe with time in parens)>
+      NOW ACTIVE | 00:47:23
+    We collapse to "<Event Name> : NOW ACTIVE | <N> minutes"
     """
-    async with async_playwright() as pw:
-        browser = await pw.chromium.launch(headless=True)
-        ctx = await browser.new_context()
-        page = await ctx.new_page()
-        await page.goto(EVENT_URL, timeout=45000)
-        # Find the "UPCOMING EVENTS" header, then take its closest panel container.
-        header = page.get_by_text("UPCOMING EVENTS", exact=False).first
-        await header.wait_for(timeout=20000)
-        # The panel is the header's closest ancestor section/card; grab its inner text.
-        panel = await header.evaluate_handle(
-            """(node) => node.closest('section,div,article')"""
-        )
-        text = await panel.evaluate("(n)=>n.innerText")
-        await ctx.close(); await browser.close()
-
-    # Parse the panel text line by line
-    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
-    # Remove the header line itself
-    if lines and "UPCOMING EVENTS" in lines[0].upper():
-        lines = lines[1:]
-
     events = []
     i = 0
     while i < len(lines):
-        line = lines[i]
-        # Heuristic: a title line tends to contain 'Event', 'Time', 'Race', 'Santa', 'Felankor', 'Collection'
-        if re.search(r"(Event|Time|Race|Santa|Felankor|Collection)", line, re.I):
-            name = pick_title(line)
-            status = None
-            # Look ahead a few lines in this card for NOW ACTIVE or a timer
-            for j in range(i+1, min(i+5, len(lines))):
-                nxt = lines[j]
-                if "NOW ACTIVE" in nxt.upper():
-                    status = "NOW ACTIVE"
-                    i = j
-                    break
+        name = lines[i]
+        # Most cards have a status line next
+        status = None
+        if i + 1 < len(lines):
+            nxt = lines[i+1]
+            if nxt.upper().startswith("NOW ACTIVE"):
+                status = "NOW ACTIVE"
+                i += 2
+            elif COUNTDOWN_RE.match(nxt):
                 mins = hhmmss_to_minutes(nxt)
-                if mins:
-                    status = f"{_plural(mins, 'minute')}"
-                    i = j
-                    break
-            if status:
-                events.append((name, status))
-        i += 1
-    return events
+                status = f"{mins} minutes"
+                i += 2
+            else:
+                # No obvious status line; just consume the name
+                i += 1
+        else:
+            i += 1
 
-def post_webhook(webhook_url: str, items: list[tuple[str, str]]) -> None:
-    if not items:
-        desc = "_No upcoming events listed on the site._"
-    else:
-        desc = "\n".join([f"• **{name}** : {status}" for name, status in items])
+        # Clean the name: drop any trailing "(HH:MM)" or similar decorations
+        name = re.sub(r"\(\s*\d{1,2}:\d{2}\s*(?:AM|PM)?\s*\)", "", name).strip()
+        # Sometimes “Event” is duplicated in lines above. Keep the first word-capitalized sentence.
+        events.append((name, status or ""))
 
+    # Remove obvious noise rows (site slogans etc.), keep items that look like event names
+    cleaned = []
+    for n, s in events:
+        if len(n) < 3: 
+            continue
+        if n.upper() in {"SERVER TIME", "EVENT DAYS", "UPCOMING EVENTS"}:
+            continue
+        cleaned.append((n, s))
+    return cleaned
+
+def format_lines(items):
+    # Keep first 4 items to avoid super long posts
+    lines = [f"• {name} : {status}" if status else f"• {name}" for name, status in items[:4]]
+    return "\n".join(lines) if lines else "• No events found"
+
+def post_webhook(url: str, desc: str):
     payload = {
         "embeds": [{
             "title": TITLE,
@@ -93,14 +81,27 @@ def post_webhook(webhook_url: str, items: list[tuple[str, str]]) -> None:
             "footer": {"text": "Source: ko4fun.net • auto-updated by GitHub Actions"}
         }]
     }
-    req = Request(webhook_url, data=json.dumps(payload).encode("utf-8"),
-                  headers={"Content-Type": "application/json"}, method="POST")
+    data = json.dumps(payload).encode("utf-8")
+    req = Request(url, data=data, headers={"Content-Type": "application/json"}, method="POST")
     with urlopen(req) as r:
-        r.read()  # drain
+        # 204 or 200 are both fine for webhooks
+        if r.status not in (200, 204):
+            raise RuntimeError(f"Discord returned HTTP {r.status}")
 
 async def main():
-    items = await fetch_upcoming()
-    post_webhook(WEBHOOK_URL, items)
+    async with async_playwright() as pw:
+        browser = await pw.chromium.launch(headless=True)
+        page = await browser.new_page()
+        await page.goto(EVENT_URL, wait_until="domcontentloaded", timeout=60000)
+
+        # The right panel is static text after the page builds; a small wait to be safe
+        await page.wait_for_timeout(800)
+        lines = await get_panel_text(page)
+        await browser.close()
+
+    items = extract_events(lines)
+    desc = format_lines(items)
+    post_webhook(WEBHOOK_URL, desc)
 
 if __name__ == "__main__":
     asyncio.run(main())
