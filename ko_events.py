@@ -8,22 +8,23 @@ CHANNEL_ID     = os.environ["DISCORD_CHANNEL_ID"].strip()
 EVENT_URL      = os.environ.get("EVENT_URL","https://ko4fun.net/Features/EventSchedule")
 
 API  = "https://discord.com/api/v10"
-HDRS_JSON = {
-    "Authorization": f"Bot {DISCORD_TOKEN}",
-    "Content-Type": "application/json"
-}
+HDRS_JSON = {"Authorization": f"Bot {DISCORD_TOKEN}", "Content-Type": "application/json"}
 TITLE = "KO4Fun — Upcoming Events"
 
 # ---------- scrape ----------
 async def fetch(session, url):
-    async with session.get(url, headers={"User-Agent":"Mozilla/5.0 KOEventAction"}, timeout=20) as r:
-        print("[HTTP] GET page:", r.status); r.raise_for_status()
+    async with session.get(url, headers={"User-Agent":"Mozilla/5.0 KOEventAction"}, timeout=25) as r:
+        print("[HTTP] GET page:", r.status)
+        r.raise_for_status()
         return await r.text()
 
 def parse_server_time_and_upcoming(html: str):
     soup = BeautifulSoup(html, "lxml")
     txt = soup.get_text(" ", strip=True)
+    print("[DEBUG] First 800 chars of text:")
+    print(txt[:800])
 
+    # Server clock (fallback if not found)
     m_time = re.search(r'(\d{2}:\d{2}:\d{2})', txt)
     hhmmss = m_time.group(1) if m_time else "00:00:00"
     m_date = re.search(r'(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},\s+\d{4}', txt)
@@ -32,17 +33,50 @@ def parse_server_time_and_upcoming(html: str):
     h,m,s = map(int, hhmmss.split(":"))
     server_dt = datetime(d.year, d.month, d.day, h, m, s)
 
+    # Prefer an Upcoming section if present
     scope_txt = txt
-    sec = re.search(r'Upcoming Events(.+)', txt, re.I)
-    if sec: scope_txt = sec.group(0)
+    sec = re.search(r'Upcoming\s+Events(.+)', txt, re.I)
+    if sec:
+        scope_txt = sec.group(0)
+
+    # Robust regex: allow NBSP/extra whitespace and 1–2 digit hours
+    # capture "Event Name (H:MM)" or "(HH:MM)"
+    pattern = re.compile(r'([A-Za-z0-9\.\&\-\/\s]+?)\s*(?:\u00A0|\s)*\(\s*(\d{1,2}:\d{2})\s*\)')
+    matches = list(pattern.finditer(scope_txt))
 
     items = []
-    for mm in re.finditer(r'([A-Za-z0-9\.\&\-\s]+?)\s*\((\d{2}:\d{2})\)', scope_txt):
-        name = " ".join(mm.group(1).split())
-        if not name or "Server" in name or "Time" in name: continue
-        items.append((name, mm.group(2)))
-    print(f"[PARSE] items: {len(items)}")
-    return server_dt, items[:10]
+    for mobj in matches:
+        name = " ".join(mobj.group(1).split())
+        time_part = mobj.group(2)
+        # filter out obvious noise
+        if not name or len(name) < 2: 
+            continue
+        bad = ("Server Time", "Server", "Upcoming Events", "See all pinned")
+        if any(b in name for b in bad):
+            continue
+        items.append((name, time_part))
+
+    # If nothing found, try the whole page as a fallback
+    if not items:
+        matches = list(pattern.finditer(txt))
+        for mobj in matches:
+            name = " ".join(mobj.group(1).split())
+            time_part = mobj.group(2)
+            if not name or len(name) < 2: 
+                continue
+            if any(b in name for b in ("Server Time","Upcoming Events")):
+                continue
+            items.append((name, time_part))
+
+    # Dedupe while preserving order
+    seen = set(); cleaned = []
+    for nm, tm in items:
+        key = (nm, tm)
+        if key not in seen:
+            seen.add(key); cleaned.append(key)
+
+    print(f"[PARSE] found {len(cleaned)} candidate items")
+    return server_dt, cleaned[:10]
 
 def to_epoch(server_dt: datetime, hhmm: str) -> int:
     eh, em = map(int, hhmm.split(":"))
@@ -57,91 +91,43 @@ def build_embed(server_dt, items):
         lines = [f"• **{n}** — <t:{to_epoch(server_dt,t)}:t> • <t:{to_epoch(server_dt,t)}:R>"
                  for n,t in items]
         desc = "\n".join(lines)
-    return {
-        "title": TITLE,
-        "description": desc,
-        "color": 0xC81E1E,
-        "footer": {"text":"Source: ko4fun.net • auto-updated by GitHub Actions"}
-    }
+    return {"title": TITLE, "description": desc, "color": 0xC81E1E,
+            "footer": {"text":"Source: ko4fun.net • auto-updated by GitHub Actions"}}
 
-# ---------- discord helpers ----------
-async def get_channel(session):
-    url = f"{API}/channels/{CHANNEL_ID}"
-    async with session.get(url, headers={"Authorization": f"Bot {DISCORD_TOKEN}"}) as r:
-        print("[HTTP] GET channel:", r.status)
-        if r.status == 200:
-            j = await r.json()
-            print(f"[INFO] channel type={j.get('type')} id_len={len(CHANNEL_ID)}")
-            return j
-        txt = await r.text()
-        raise RuntimeError(f"GET /channels/{CHANNEL_ID} -> {r.status} {txt}")
-
-async def list_messages(session, limit=50):
-    async with session.get(f"{API}/channels/{CHANNEL_ID}/messages?&limit={limit}",
+# ---------- discord ----------
+async def post_or_edit(session, embed):
+    # list last 50 messages, edit our own if present
+    async with session.get(f"{API}/channels/{CHANNEL_ID}/messages?limit=50",
                            headers={"Authorization": f"Bot {DISCORD_TOKEN}"}) as r:
-        print("[HTTP] LIST messages:", r.status); r.raise_for_status()
-        return await r.json()
-
-async def post_simple(session, text):
-    async with session.post(f"{API}/channels/{CHANNEL_ID}/messages",
-                            headers=HDRS_JSON, json={"content": text}) as r:
-        print("[HTTP] POST simple:", r.status)
-        txt = await r.text()
-        if r.status >= 400: raise RuntimeError(txt)
-        return await r.json()
-
-async def post_embed(session, embed):
-    async with session.post(f"{API}/channels/{CHANNEL_ID}/messages",
-                            headers=HDRS_JSON, json={"content":"", "embeds":[embed]}) as r:
-        print("[HTTP] POST embed:", r.status)
-        txt = await r.text()
-        if r.status >= 400: raise RuntimeError(txt)
-        return await r.json()
-
-async def pin_try(session, mid):
-    async with session.put(f"{API}/channels/{CHANNEL_ID}/pins/{mid}",
-                           headers={"Authorization": f"Bot {DISCORD_TOKEN}"}) as r:
-        print("[HTTP] PUT pin:", r.status)
-
-async def edit_message(session, mid, embed):
-    async with session.patch(f"{API}/channels/{CHANNEL_ID}/messages/{mid}",
-                             headers=HDRS_JSON, json={"content":"", "embeds":[embed]}) as r:
-        print("[HTTP] PATCH edit:", r.status)
-        txt = await r.text()
-        if r.status >= 400: raise RuntimeError(txt)
-
-async def find_existing(session):
-    # scan recent for our title
-    msgs = await list_messages(session, 50)
+        r.raise_for_status()
+        msgs = await r.json()
+    mid = None
     for m in msgs:
         if m.get("author",{}).get("bot") and any(e.get("title")==TITLE for e in m.get("embeds",[])):
-            return m["id"]
-    return None
+            mid = m["id"]; break
+    if mid:
+        async with session.patch(f"{API}/channels/{CHANNEL_ID}/messages/{mid}",
+                                 headers=HDRS_JSON, json={"content":"", "embeds":[embed]}) as r:
+            print("[HTTP] PATCH edit:", r.status); r.raise_for_status()
+    else:
+        async with session.post(f"{API}/channels/{CHANNEL_ID}/messages",
+                                headers=HDRS_JSON, json={"content":"", "embeds":[embed]}) as r:
+            print("[HTTP] POST embed:", r.status); r.raise_for_status()
+            msg = await r.json()
+        # best-effort pin
+        try:
+            async with session.put(f"{API}/channels/{CHANNEL_ID}/pins/{msg['id']}",
+                                   headers={"Authorization": f"Bot {DISCORD_TOKEN}"}) as r:
+                print("[HTTP] PUT pin:", r.status)
+        except Exception as e:
+            print("[WARN] pin failed:", e)
 
-# ---------- main ----------
 async def main():
     async with aiohttp.ClientSession() as session:
-        # sanity: can we see the channel?
-        await get_channel(session)
-
         html = await fetch(session, EVENT_URL)
         server_dt, items = parse_server_time_and_upcoming(html)
         embed = build_embed(server_dt, items)
-
-        mid = await find_existing(session)
-        if mid:
-            await edit_message(session, mid, embed)
-            return
-
-        # create flow: post a simple text first (same as diag), then edit with embed
-        msg = await post_simple(session, "KO4Fun — Upcoming Events (initializing…)")
-        mid = msg["id"]
-        try:
-            await pin_try(session, mid)  # may 403; that's fine
-        except Exception as e:
-            print("[WARN] pin failed:", e)
-        await edit_message(session, mid, embed)
+        await post_or_edit(session, embed)
 
 if __name__ == "__main__":
-    print(f"[INFO] Using channel id length={len(CHANNEL_ID)}")
     asyncio.run(main())
