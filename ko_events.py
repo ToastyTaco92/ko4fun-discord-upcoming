@@ -92,4 +92,27 @@ def build_embed(server_dt: datetime, items):
         "footer": {"text": "Source: ko4fun.net • auto-updated by GitHub Actions"},
     }
 
-# ---------- Discord REST
+# ---------- Discord REST ----------
+def post_message(content="", embed=None):
+    payload = {"content": content}
+    if embed is not None:
+        payload["embeds"] = [embed]
+    req = Request(f"{API_BASE}/channels/{CHANNEL_ID}/messages",
+                  data=json.dumps(payload).encode(),
+                  headers=HDR_JSON, method="POST")
+    with urlopen(req) as r:
+        return json.loads(r.read().decode())
+
+# ---------- Main ----------
+async def main():
+    text = await get_rendered_text(EVENT_URL)
+    print("[DEBUG]", text[:300].replace("\n", " "))
+    server_dt = parse_server_time(text)
+    items = parse_upcoming_items(text)
+    print(f"[INFO] Parsed items: {len(items)}")
+    embed = build_embed(server_dt, items)
+    # always create a NEW message each run:
+    post_message("", embed)
+
+if __name__ == "__main__":
+    asyncio.run(main())
